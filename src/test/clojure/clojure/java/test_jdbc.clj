@@ -177,6 +177,36 @@
        [:grade :real]
        :table-spec "")))
 
+(defn- returned-key [db k]
+  (condp = (:subprotocol db)
+    "derby"  {(keyword "1") nil}
+    "hsqldb" 1
+    "mysql"  {:generated_key k}
+    nil      (if (mysql? db) ; string-based tests
+               {:generated_key k}
+               k)
+    "jtds:sqlserver" {:id nil}
+    "sqlserver" {:generated_keys nil}
+    "sqlite" {(keyword "last_insert_rowid()") k}
+    k))
+
+(defn- generated-key [db k]
+  (condp = (:subprotocol db)
+    "derby" 0
+    "hsqldb" 0
+    "jtds:sqlserver" 0
+    "sqlserver" 0
+    "sqlite" 0
+    k))
+
+(defn- float-or-double [db v]
+  (condp = (:subprotocol db)
+    "derby" (Float. v)
+    "jtds:sqlserver" (Float. v)
+    "sqlserver" (Float. v)
+    "postgresql" (Float. v)
+    v))
+
 (deftest test-uri-spec-parsing
   (is (= {:advanced "false" :ssl "required" :password "clojure_test"
           :user "clojure_test" :subname "//localhost/clojure_test"
@@ -305,12 +335,30 @@
       (let [connection (:connection conn)
             prepared-statement (sql/prepare-statement connection (str "INSERT INTO fruit ( name, appearance, cost ) "
                                                                       "VALUES ( ?, ?, ? )"))]
-
         (sql/execute! db [prepared-statement "Apple" "Green" 75])
         (sql/execute! db [prepared-statement "Pear" "Yellow" 99])))
     (is (= 2 (sql/query db ["SELECT * FROM fruit"] :result-set-fn count)))
     (is (= "Pear" (sql/query db ["SELECT * FROM fruit WHERE cost = ?" 99]
                              :result-set-fn (comp :name first))))))
+
+(deftest execute-return-keys-with-strings
+  (doseq [db (test-specs)]
+    (create-test-table :fruit db)
+    (sql/with-db-connection [conn db]
+      (let [connection (:connection conn)
+            sql "INSERT INTO fruit ( name, appearance, cost ) values (?, ?, ?)"]
+        (is (= (returned-key db 1) (first (sql/execute-return-keys! db [sql "Apple" "Green" 75]))))
+        (is (= (returned-key db 2) (first (sql/execute-return-keys! db [sql "Pear" "Yellow" 99]))))))))
+
+(deftest execute-return-keys-with-prepared-statements
+  (doseq [db (test-specs)]
+    (create-test-table :fruit db)
+    (sql/with-db-connection [conn db]
+      (let [connection (:connection conn)
+            sql "INSERT INTO fruit (name, appearance, cost) values (?, ?, ?)"
+            stmt (sql/prepare-statement connection sql :return-keys true)]
+        (is (= (returned-key db 1) (first (sql/execute-return-keys! db [stmt "Apple" "Green" 75]))))
+        (is (= (returned-key db 2) (first (sql/execute-return-keys! db [stmt "Pear" "Yellow" 99]))))))))
 
 (deftest test-update-values
   (doseq [db (test-specs)]
@@ -563,36 +611,6 @@
                            first
                            :table_name
                            clojure.string/lower-case)))))))
-
-(defn- returned-key [db k]
-  (condp = (:subprotocol db)
-    "derby"  {(keyword "1") nil}
-    "hsqldb" 1
-    "mysql"  {:generated_key k}
-    nil      (if (mysql? db) ; string-based tests
-               {:generated_key k}
-               k)
-    "jtds:sqlserver" {:id nil}
-    "sqlserver" {:generated_keys nil}
-    "sqlite" {(keyword "last_insert_rowid()") k}
-    k))
-
-(defn- generated-key [db k]
-  (condp = (:subprotocol db)
-    "derby" 0
-    "hsqldb" 0
-    "jtds:sqlserver" 0
-    "sqlserver" 0
-    "sqlite" 0
-    k))
-
-(defn- float-or-double [db v]
-  (condp = (:subprotocol db)
-    "derby" (Float. v)
-    "jtds:sqlserver" (Float. v)
-    "sqlserver" (Float. v)
-    "postgresql" (Float. v)
-    v))
 
 (deftest empty-query
   (doseq [db (test-specs)]

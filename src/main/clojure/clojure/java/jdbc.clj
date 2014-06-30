@@ -666,6 +666,29 @@ compatibility but it will be removed before a 1.0.0 release." }
       (with-open [^java.sql.Connection con (get-connection db)]
         (apply db-do-commands (add-connection db con) transaction? commands)))))
 
+(defn- db-do-execute-prepared-statement-return-keys [db transaction? ^PreparedStatement stmt param-group]
+  ((or (:set-parameters db) set-parameters) stmt param-group)
+  (let [exec-and-return-keys
+        (^{:once true} fn* []
+         (let [counts (.executeUpdate stmt)]
+           (try
+             (let [rs (.getGeneratedKeys stmt)
+                   result (first (result-set-seq rs))]
+               ;; sqlite (and maybe others?) requires
+               ;; record set to be closed
+               (.close rs)
+               result)
+             (catch Exception _
+               ;; assume generated keys is unsupported and return counts instead:
+               counts))))]
+    (if transaction?
+      (with-db-transaction [t-db (add-connection db (.getConnection stmt))]
+        (exec-and-return-keys))
+      (try
+        (exec-and-return-keys)
+        (catch Exception e
+          (throw-non-rte e))))))
+
 (defn db-do-prepared-return-keys
   "Executes an (optionally parameterized) SQL prepared statement on the
   open database connection. The param-group is a seq of values for all of
@@ -675,28 +698,10 @@ compatibility but it will be removed before a 1.0.0 release." }
      (db-do-prepared-return-keys db true sql param-group))
   ([db transaction? sql param-group]
      (if-let [^java.sql.Connection con (db-find-connection db)]
-       (with-open [^PreparedStatement stmt (prepare-statement con sql :return-keys true)]
-         ((or (:set-parameters db) set-parameters) stmt param-group)
-         (let [exec-and-return-keys
-               (^{:once true} fn* []
-                (let [counts (.executeUpdate stmt)]
-                  (try
-                    (let [rs (.getGeneratedKeys stmt)
-                          result (first (result-set-seq rs))]
-                      ;; sqlite (and maybe others?) requires
-                      ;; record set to be closed
-                      (.close rs)
-                      result)
-                    (catch Exception _
-                      ;; assume generated keys is unsupported and return counts instead: 
-                      counts))))]
-           (if transaction?
-             (with-db-transaction [t-db (add-connection db (.getConnection stmt))]
-               (exec-and-return-keys))
-             (try
-               (exec-and-return-keys)
-               (catch Exception e
-                 (throw-non-rte e))))))
+       (if (instance? PreparedStatement sql)
+         (db-do-execute-prepared-statement-return-keys db transaction? sql param-group)
+         (with-open [^PreparedStatement stmt (prepare-statement con sql :return-keys true)]
+           (db-do-execute-prepared-statement-return-keys db transaction? stmt param-group)))
        (with-open [^java.sql.Connection con (get-connection db)]
          (db-do-prepared-return-keys (add-connection db con) transaction? sql param-group)))))
 
@@ -843,6 +848,14 @@ compatibility but it will be removed before a 1.0.0 release." }
       (execute-helper db)
       (with-open [^java.sql.Connection con (get-connection db)]
         (execute-helper (add-connection db con))))))
+
+(defn execute-return-keys!
+  "Similar to execute, but returns the keys. Can be used to insert via a prepared statement"
+  {:arglists '([db-spec [sql & params] :transaction? true]
+                 [db-spec [sql & param-groups] :transaction? true])}
+  [db [sql & param-groups] & {:keys [transaction?]
+                              :or {transaction? true}}]
+  (list (db-do-prepared-return-keys db transaction? sql param-groups)))
 
 (defn- table-str
   "Transform a table spec to an entity name for SQL. The table spec may be a
